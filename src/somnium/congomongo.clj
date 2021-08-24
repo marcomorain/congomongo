@@ -30,11 +30,10 @@
                         MongoClientURI MongoCredential
                         DB DBCollection DBObject DBRef ServerAddress ReadPreference WriteConcern Bytes
                         AggregationOptions AggregationOptions$OutputMode
-                        GroupCommand
                         MapReduceCommand MapReduceCommand$OutputType]
            [com.mongodb.gridfs GridFS]
-           [com.mongodb.util JSON]
            [org.bson.types ObjectId]
+           java.util.List
            (java.util.concurrent TimeUnit)))
 
 
@@ -96,22 +95,24 @@
   (ServerAddress. host port))
 
 (defn- make-mongo-client
-  ([addresses creds options]
+  (^com.mongodb.MongoClient
+   [addresses creds ^MongoClientOptions options]
     (if (> (count addresses) 1)
-      (MongoClient. ^java.util.List addresses creds options)
-      (MongoClient. ^ServerAddress (first addresses) creds options)))
+      (MongoClient. ^List addresses ^List creds options)
+      (MongoClient. ^ServerAddress (first addresses) ^List creds options)))
 
-  ([addresses options]
+  (^com.mongodb.MongoClient
+   [addresses ^MongoClientOptions options]
     (if (> (count addresses) 1)
-      (MongoClient. ^java.util.List addresses options)
+      (MongoClient. ^List addresses options)
       (MongoClient. ^ServerAddress (first addresses) options))))
 
 (defn- make-connection-args
   "Makes a connection with passed database name, [{:host host, :port port}]
   server addresses and MongoClientOptions.
 
-  username and password may be supplied for authenticated connections."
-  [db {:keys [instances options username password]}]
+  username, password, and optionally auth-source, may be supplied for authenticated connections."
+  [db {:keys [instances options ^String username ^String password] {auth-mechanism :mechanism auth-source :source} :auth-source}]
   (when (not= (nil? username) (nil? password))
     (throw (IllegalArgumentException. "Username and password must both be supplied for authenticated connections")))
 
@@ -120,13 +121,29 @@
                        (or instances [{:host "127.0.0.1" :port 27017}]))
 
         ^MongoClientOptions options (or options (mongo-options))
+        ^MongoCredential credential (when (and username password)
+                                      (cond
+                                        (= :plain auth-mechanism)
+                                        (MongoCredential/createPlainCredential username auth-source
+                                                                               (.toCharArray password))
 
-        mongo (cond
-                (and username password) (make-mongo-client
-                                          addresses
-                                          [(MongoCredential/createCredential username db (.toCharArray password))]
-                                          options)
-                :else (make-mongo-client addresses options))
+                                        (= :scram-1 auth-mechanism)
+                                        (MongoCredential/createScramSha1Credential username auth-source
+                                                                                   (.toCharArray password))
+
+                                        (= :scram-256 auth-mechanism)
+                                        (MongoCredential/createScramSha256Credential username auth-source
+                                                                                     (.toCharArray password))
+
+                                        auth-mechanism
+                                        (throw (UnsupportedOperationException. (str auth-mechanism " is not supported.")))
+
+                                        :else
+                                        (MongoCredential/createCredential username db (.toCharArray password))))
+
+        mongo (if credential
+                (make-mongo-client addresses [credential] options)
+                (make-mongo-client addresses options))
 
         n-db (if db (.getDB mongo db) nil)]
       {:mongo mongo :db n-db}))
@@ -151,6 +168,12 @@
     :options - a MongoClientOptions object
     :username - the username to authenticate with
     :password - the password to authenticate with
+    :auth-source - the authentication source for authenticated connections in form:
+      {:mechanism mechanism :source source}
+      Supported authentication mechanisms:
+        :plain
+        :scram-1
+        :scram-256
 
   If instances are not specified a connection is made to 127.0.0.1:27017
 
@@ -162,7 +185,8 @@
   {:arglists '([db :instances [{:host host, :port port}]
                    :options mongo-options
                    :username username
-                   :password password]
+                   :password password
+                   :auth-source {:mechanism mechanism :source source}]
                [mongo-client-uri])}
   [db & {:as args}]
   (let [^String dbname (named db)]
@@ -341,11 +365,11 @@ When with-mongo and set-connection! interact, last one wins"
 
 (def ^:private read-preference-map
   "Private map of facory functions of ReadPreferences to aliases."
-  {:nearest (fn nearest ([] (ReadPreference/nearest)) ([tags] (ReadPreference/nearest tags)))
+  {:nearest (fn nearest ([] (ReadPreference/nearest)) ([^List tags] (ReadPreference/nearest tags)))
    :primary (fn primary ([] (ReadPreference/primary)) ([_] (throw (IllegalArgumentException. "Read preference :primary does not accept tag sets."))))
-   :primary-preferred (fn primary-preferred ([] (ReadPreference/primaryPreferred)) ([tags] (ReadPreference/primaryPreferred tags)))
-   :secondary (fn secondary ([] (ReadPreference/secondary)) ([tags] (ReadPreference/secondary tags)))
-   :secondary-preferred (fn secondary-preferred ([] (ReadPreference/secondaryPreferred)) ([tags] (ReadPreference/secondaryPreferred tags)))})
+   :primary-preferred (fn primary-preferred ([] (ReadPreference/primaryPreferred)) ([^List tags] (ReadPreference/primaryPreferred tags)))
+   :secondary (fn secondary ([] (ReadPreference/secondary)) ([^List tags] (ReadPreference/secondary tags)))
+   :secondary-preferred (fn secondary-preferred ([] (ReadPreference/secondaryPreferred)) ([^List tags] (ReadPreference/secondaryPreferred tags)))})
 
 (defn- named?
   [x]
@@ -356,7 +380,7 @@ When with-mongo and set-connection! interact, last one wins"
   (letfn [(->tag [[k v]]
             (com.mongodb.Tag. (if (named? k) (name k) (str k))
                               (if (named? v) (name v) (str v))))]
-    (com.mongodb.TagSet. (map ->tag tag))))
+    (com.mongodb.TagSet. ^List (map ->tag tag))))
 
 
 (defn read-preference
@@ -432,7 +456,7 @@ You should use fetch with :limit 1 instead."))); one? and sort should NEVER be c
                                          (-> % second #{1 -1})))
                                hint)))
       (throw (IllegalArgumentException. ":hint requires a string name of the index, or a seq of keywords that is the index definition")))
-    (let [n-where (coerce where [from :mongo])
+    (let [n-where ^DBObject (coerce where [from :mongo])
           n-only  (coerce-fields only)
           n-col   (get-coll coll)
                                         ; congomongo originally used do convert passed `limit` into negative number because mongo
@@ -459,9 +483,6 @@ You should use fetch with :limit 1 instead."))); one? and sort should NEVER be c
           n-limit (or limit 0)
           n-sort (when sort (coerce sort [from :mongo]))
           n-options (calculate-query-options options)
-          n-hint (cond (string? hint) hint
-                       (nil? hint) nil
-                       :else (coerce-index-fields hint))
           n-preferences (cond
                           (nil? read-preferences) nil
                           (instance? ReadPreference read-preferences) read-preferences
@@ -476,13 +497,15 @@ You should use fetch with :limit 1 instead."))); one? and sort should NEVER be c
                             (.findOne ^DBCollection n-col ^DBObject n-where ^DBObject n-only))]
                  (coerce m [:mongo as]) nil)
 
-        :else  (when-let [cursor (.find ^DBCollection n-col
-                                        ^DBObject n-where
-                                        ^DBObject n-only)]
+        :else  (when-let [cursor (.find n-col
+                                        n-where
+                                        n-only)]
                  (when n-preferences
                    (.setReadPreference cursor n-preferences))
-                 (when n-hint
-                   (.hint cursor n-hint))
+                 (when hint
+                   (if (string? hint)
+                     (.hint cursor ^String hint)
+                     (.hint cursor ^DBObject (coerce-index-fields hint))))
                  (when n-options
                    (.setOptions cursor n-options))
                  (when n-sort
@@ -556,9 +579,9 @@ You should use fetch with :limit 1 instead."))); one? and sort should NEVER be c
         list-obj (if many coerced-obj (list coerced-obj))
         res (if write-concern
               (if-let [wc (write-concern write-concern-map)]
-                (.insert ^DBCollection (get-coll coll) ^java.util.List list-obj ^WriteConcern wc)
+                (.insert ^DBCollection (get-coll coll) ^List list-obj ^WriteConcern wc)
                 (illegal-write-concern write-concern))
-              (.insert ^DBCollection (get-coll coll) ^java.util.List list-obj))]
+              (.insert ^DBCollection (get-coll coll) ^List list-obj))]
     (coerce coerced-obj [:mongo to] :many many)))
 
 (defn mass-insert!
@@ -700,7 +723,7 @@ You should use fetch with :limit 1 instead."))); one? and sort should NEVER be c
         from-and-to (drop-while (complement keyword?) ops-and-from-to)
         {:keys [from to] :or {from :clojure to :clojure}} from-and-to
         cursor (.aggregate (get-coll coll)
-                           ^java.util.List (coerce (conj ops op) [from :mongo])
+                           ^List (coerce (conj ops op) [from :mongo])
                            ^AggregationOptions (-> (AggregationOptions/builder)
                                                    (.outputMode AggregationOptions$OutputMode/CURSOR)
                                                    (.build)))]
@@ -714,10 +737,10 @@ You should use fetch with :limit 1 instead."))); one? and sort should NEVER be c
   [cmd & {:keys [options from to]
           :or {options nil from :clojure to :clojure}}]
   (let [db (get-db *mongo-config*)
-        coerced (coerce cmd [from :mongo])]
+        coerced ^DBObject (coerce cmd [from :mongo])]
     (coerce (if options
-              (.command db ^DBObject coerced (int options))
-              (.command db ^DBObject coerced))
+              (.command db coerced (int options))
+              (.command db coerced))
             [:mongo to])))
 
 (defn drop-database!
@@ -814,7 +837,7 @@ You should use fetch with :limit 1 instead."))); one? and sort should NEVER be c
    should be either an OutputStream, File, or the String path for a file."
   [fs file out]
   ;; since .findOne is overloaded and coerce returns different types, we cannot remove the reflection warning:
-  (if-let [^com.mongodb.gridfs.GridFSDBFile f (.findOne ^GridFS (get-gridfs fs) (coerce file [:clojure :mongo]))]
+  (if-let [^com.mongodb.gridfs.GridFSDBFile f (.findOne ^GridFS (get-gridfs fs) ^DBObject (coerce file [:clojure :mongo]))]
     ;; since .writeTo is overloaded and we can pass different types, we cannot remove the reflection warning:
     (.writeTo f out)))
 
@@ -822,7 +845,7 @@ You should use fetch with :limit 1 instead."))); one? and sort should NEVER be c
   "Returns an InputStream from the GridFS file specified"
   [fs file]
   ;; since .findOne is overloaded and coerce returns different types, we cannot remove the reflection warning:
-  (if-let [^com.mongodb.gridfs.GridFSDBFile f (.findOne ^GridFS (get-gridfs fs) (coerce file [:clojure :mongo]))]
+  (if-let [^com.mongodb.gridfs.GridFSDBFile f (.findOne ^GridFS (get-gridfs fs) ^DBObject (coerce file [:clojure :mongo]))]
     (.getInputStream f)))
 
 (defn- mapreduce-type
