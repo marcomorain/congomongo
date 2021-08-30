@@ -263,10 +263,21 @@ When with-mongo and set-connection! interact, last one wins"
 
 (def write-concern-map
   {:acknowledged         WriteConcern/ACKNOWLEDGED
+   :fsynced              WriteConcern/JOURNALED
    :journaled            WriteConcern/JOURNALED
    :majority             WriteConcern/MAJORITY
    :replica-acknowledged WriteConcern/W2
-   :unacknowledged       WriteConcern/UNACKNOWLEDGED})
+   :unacknowledged       WriteConcern/UNACKNOWLEDGED
+   ;; these are pre-2.10.x names for write concern:
+   :fsync-safe    WriteConcern/JOURNALED
+   :journal-safe  WriteConcern/JOURNALED
+   :normal        WriteConcern/UNACKNOWLEDGED
+   :replicas-safe WriteConcern/W2
+   :safe          WriteConcern/ACKNOWLEDGED
+   ;; these are left for backward compatibility but are deprecated:
+   :replica-safe WriteConcern/W2
+   :strict       WriteConcern/ACKNOWLEDGED
+   })
 
 (defn set-write-concern
   "Sets the write concern on the connection. Setting is a key in the
